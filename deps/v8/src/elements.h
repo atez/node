@@ -171,9 +171,17 @@ class ElementsAccessor {
                                       Handle<Object> value, uint32_t start,
                                       uint32_t length) = 0;
 
+  virtual Maybe<int64_t> LastIndexOfValue(Isolate* isolate,
+                                          Handle<JSObject> receiver,
+                                          Handle<Object> value,
+                                          uint32_t start) = 0;
+
   virtual void CopyElements(Handle<FixedArrayBase> source,
                             ElementsKind source_kind,
                             Handle<FixedArrayBase> destination, int size) = 0;
+
+  virtual Handle<FixedArray> CreateListFromArray(Isolate* isolate,
+                                                 Handle<JSArray> array) = 0;
 
  protected:
   friend class LookupIterator;

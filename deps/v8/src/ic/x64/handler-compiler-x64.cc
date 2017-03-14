@@ -44,16 +44,6 @@ void PropertyHandlerCompiler::DiscardVectorAndSlot() {
   __ addp(rsp, Immediate(2 * kPointerSize));
 }
 
-void PropertyHandlerCompiler::PushReturnAddress(Register tmp) {
-  MacroAssembler* masm = this->masm();
-  __ Push(tmp);
-}
-
-void PropertyHandlerCompiler::PopReturnAddress(Register tmp) {
-  MacroAssembler* masm = this->masm();
-  __ Pop(tmp);
-}
-
 void PropertyHandlerCompiler::GenerateDictionaryNegativeLookup(
     MacroAssembler* masm, Label* miss_label, Register receiver,
     Handle<Name> name, Register scratch0, Register scratch1) {
@@ -92,50 +82,6 @@ void PropertyHandlerCompiler::GenerateDictionaryNegativeLookup(
   __ bind(&done);
   __ DecrementCounter(counters->negative_lookups_miss(), 1);
 }
-
-
-void NamedLoadHandlerCompiler::GenerateDirectLoadGlobalFunctionPrototype(
-    MacroAssembler* masm, int index, Register result, Label* miss) {
-  __ LoadNativeContextSlot(index, result);
-  // Load its initial map. The global functions all have initial maps.
-  __ movp(result,
-          FieldOperand(result, JSFunction::kPrototypeOrInitialMapOffset));
-  // Load the prototype from the initial map.
-  __ movp(result, FieldOperand(result, Map::kPrototypeOffset));
-}
-
-
-void NamedLoadHandlerCompiler::GenerateLoadFunctionPrototype(
-    MacroAssembler* masm, Register receiver, Register result, Register scratch,
-    Label* miss_label) {
-  __ TryGetFunctionPrototype(receiver, result, miss_label);
-  if (!result.is(rax)) __ movp(rax, result);
-  __ ret(0);
-}
-
-
-static void PushInterceptorArguments(MacroAssembler* masm, Register receiver,
-                                     Register holder, Register name,
-                                     Handle<JSObject> holder_obj) {
-  STATIC_ASSERT(NamedLoadHandlerCompiler::kInterceptorArgsNameIndex == 0);
-  STATIC_ASSERT(NamedLoadHandlerCompiler::kInterceptorArgsThisIndex == 1);
-  STATIC_ASSERT(NamedLoadHandlerCompiler::kInterceptorArgsHolderIndex == 2);
-  STATIC_ASSERT(NamedLoadHandlerCompiler::kInterceptorArgsLength == 3);
-  __ Push(name);
-  __ Push(receiver);
-  __ Push(holder);
-}
-
-
-static void CompileCallLoadPropertyWithInterceptor(
-    MacroAssembler* masm, Register receiver, Register holder, Register name,
-    Handle<JSObject> holder_obj, Runtime::FunctionId id) {
-  DCHECK(NamedLoadHandlerCompiler::kInterceptorArgsLength ==
-         Runtime::FunctionForId(id)->nargs);
-  PushInterceptorArguments(masm, receiver, holder, name, holder_obj);
-  __ CallRuntime(id);
-}
-
 
 // Generate call to api function.
 void PropertyHandlerCompiler::GenerateApiAccessorCall(
@@ -210,13 +156,6 @@ void PropertyHandlerCompiler::GenerateApiAccessorCall(
               FieldOperand(callee, FunctionTemplateInfo::kCallCodeOffset));
     }
     __ movp(data, FieldOperand(data, CallHandlerInfo::kDataOffset));
-  }
-
-  if (api_call_info->fast_handler()->IsCode()) {
-    // Just tail call into the fast handler if present.
-    __ Jump(handle(Code::cast(api_call_info->fast_handler())),
-            RelocInfo::CODE_TARGET);
-    return;
   }
 
   // Put api_function_address in place.
@@ -348,59 +287,6 @@ void NamedStoreHandlerCompiler::GenerateRestoreName(Label* label,
   }
 }
 
-
-void NamedStoreHandlerCompiler::GenerateRestoreName(Handle<Name> name) {
-  __ Move(this->name(), name);
-}
-
-
-void NamedStoreHandlerCompiler::GenerateRestoreMap(Handle<Map> transition,
-                                                   Register map_reg,
-                                                   Register scratch,
-                                                   Label* miss) {
-  Handle<WeakCell> cell = Map::WeakCellForMap(transition);
-  DCHECK(!map_reg.is(scratch));
-  __ LoadWeakValue(map_reg, cell, miss);
-  if (transition->CanBeDeprecated()) {
-    __ movl(scratch, FieldOperand(map_reg, Map::kBitField3Offset));
-    __ andl(scratch, Immediate(Map::Deprecated::kMask));
-    __ j(not_zero, miss);
-  }
-}
-
-
-void NamedStoreHandlerCompiler::GenerateConstantCheck(Register map_reg,
-                                                      int descriptor,
-                                                      Register value_reg,
-                                                      Register scratch,
-                                                      Label* miss_label) {
-  DCHECK(!map_reg.is(scratch));
-  DCHECK(!map_reg.is(value_reg));
-  DCHECK(!value_reg.is(scratch));
-  __ LoadInstanceDescriptors(map_reg, scratch);
-  __ movp(scratch,
-          FieldOperand(scratch, DescriptorArray::GetValueOffset(descriptor)));
-  __ cmpp(value_reg, scratch);
-  __ j(not_equal, miss_label);
-}
-
-void NamedStoreHandlerCompiler::GenerateFieldTypeChecks(FieldType* field_type,
-                                                        Register value_reg,
-                                                        Label* miss_label) {
-  Register map_reg = scratch1();
-  Register scratch = scratch2();
-  DCHECK(!value_reg.is(map_reg));
-  DCHECK(!value_reg.is(scratch));
-  __ JumpIfSmi(value_reg, miss_label);
-  if (field_type->IsClass()) {
-    Label do_store;
-    __ movp(map_reg, FieldOperand(value_reg, HeapObject::kMapOffset));
-    __ CmpWeakValue(map_reg, Map::WeakCellForMap(field_type->AsClass()),
-                    scratch);
-    __ j(not_equal, miss_label);
-  }
-}
-
 void PropertyHandlerCompiler::GenerateAccessCheck(
     Handle<WeakCell> native_context_cell, Register scratch1, Register scratch2,
     Label* miss, bool compare_native_contexts_only) {
@@ -426,8 +312,7 @@ void PropertyHandlerCompiler::GenerateAccessCheck(
 
 Register PropertyHandlerCompiler::CheckPrototypes(
     Register object_reg, Register holder_reg, Register scratch1,
-    Register scratch2, Handle<Name> name, Label* miss,
-    ReturnHolder return_what) {
+    Register scratch2, Handle<Name> name, Label* miss) {
   Handle<Map> receiver_map = map();
 
   // Make sure there's no overlap between holder and object registers.
@@ -495,15 +380,14 @@ Register PropertyHandlerCompiler::CheckPrototypes(
   // Log the check depth.
   LOG(isolate(), IntEvent("check-maps-depth", depth + 1));
 
-  bool return_holder = return_what == RETURN_HOLDER;
-  if (return_holder && depth != 0) {
+  if (depth != 0) {
     Handle<WeakCell> weak_cell =
         Map::GetOrCreatePrototypeWeakCell(current, isolate());
     __ LoadWeakValue(reg, weak_cell, miss);
   }
 
   // Return the register containing the holder.
-  return return_holder ? reg : no_reg;
+  return reg;
 }
 
 
@@ -512,10 +396,8 @@ void NamedLoadHandlerCompiler::FrontendFooter(Handle<Name> name, Label* miss) {
     Label success;
     __ jmp(&success);
     __ bind(miss);
-    if (IC::ICUseVector(kind())) {
-      DCHECK(kind() == Code::LOAD_IC);
-      PopVectorAndSlot();
-    }
+    DCHECK(kind() == Code::LOAD_IC);
+    PopVectorAndSlot();
     TailCallBuiltin(masm(), MissBuiltin(kind()));
     __ bind(&success);
   }
@@ -527,91 +409,10 @@ void NamedStoreHandlerCompiler::FrontendFooter(Handle<Name> name, Label* miss) {
     Label success;
     __ jmp(&success);
     GenerateRestoreName(miss, name);
-    if (IC::ICUseVector(kind())) PopVectorAndSlot();
+    PopVectorAndSlot();
     TailCallBuiltin(masm(), MissBuiltin(kind()));
     __ bind(&success);
   }
-}
-
-void NamedLoadHandlerCompiler::GenerateLoadConstant(Handle<Object> value) {
-  // Return the constant value.
-  __ Move(rax, value);
-  __ ret(0);
-}
-
-
-void NamedLoadHandlerCompiler::GenerateLoadInterceptorWithFollowup(
-    LookupIterator* it, Register holder_reg) {
-  DCHECK(holder()->HasNamedInterceptor());
-  DCHECK(!holder()->GetNamedInterceptor()->getter()->IsUndefined(isolate()));
-
-  // Compile the interceptor call, followed by inline code to load the
-  // property from further up the prototype chain if the call fails.
-  // Check that the maps haven't changed.
-  DCHECK(holder_reg.is(receiver()) || holder_reg.is(scratch1()));
-
-  // Preserve the receiver register explicitly whenever it is different from the
-  // holder and it is needed should the interceptor return without any result.
-  // The ACCESSOR case needs the receiver to be passed into C++ code, the FIELD
-  // case might cause a miss during the prototype check.
-  bool must_perform_prototype_check =
-      !holder().is_identical_to(it->GetHolder<JSObject>());
-  bool must_preserve_receiver_reg =
-      !receiver().is(holder_reg) &&
-      (it->state() == LookupIterator::ACCESSOR || must_perform_prototype_check);
-
-  // Save necessary data before invoking an interceptor.
-  // Requires a frame to make GC aware of pushed pointers.
-  {
-    FrameScope frame_scope(masm(), StackFrame::INTERNAL);
-
-    if (must_preserve_receiver_reg) {
-      __ Push(receiver());
-    }
-    __ Push(holder_reg);
-    __ Push(this->name());
-    InterceptorVectorSlotPush(holder_reg);
-
-    // Invoke an interceptor.  Note: map checks from receiver to
-    // interceptor's holder has been compiled before (see a caller
-    // of this method.)
-    CompileCallLoadPropertyWithInterceptor(
-        masm(), receiver(), holder_reg, this->name(), holder(),
-        Runtime::kLoadPropertyWithInterceptorOnly);
-
-    // Check if interceptor provided a value for property.  If it's
-    // the case, return immediately.
-    Label interceptor_failed;
-    __ CompareRoot(rax, Heap::kNoInterceptorResultSentinelRootIndex);
-    __ j(equal, &interceptor_failed);
-    frame_scope.GenerateLeaveFrame();
-    __ ret(0);
-
-    __ bind(&interceptor_failed);
-    InterceptorVectorSlotPop(holder_reg);
-    __ Pop(this->name());
-    __ Pop(holder_reg);
-    if (must_preserve_receiver_reg) {
-      __ Pop(receiver());
-    }
-
-    // Leave the internal frame.
-  }
-
-  GenerateLoadPostInterceptor(it, holder_reg);
-}
-
-
-void NamedLoadHandlerCompiler::GenerateLoadInterceptor(Register holder_reg) {
-  // Call the runtime system to load the interceptor.
-  DCHECK(holder()->HasNamedInterceptor());
-  DCHECK(!holder()->GetNamedInterceptor()->getter()->IsUndefined(isolate()));
-  __ PopReturnAddressTo(scratch2());
-  PushInterceptorArguments(masm(), receiver(), holder_reg, this->name(),
-                           holder());
-  __ PushReturnAddressFrom(scratch2());
-
-  __ TailCallRuntime(Runtime::kLoadPropertyWithInterceptor);
 }
 
 void NamedStoreHandlerCompiler::ZapStackArgumentsRegisterAliases() {
@@ -649,43 +450,6 @@ Handle<Code> NamedStoreHandlerCompiler::CompileStoreCallback(
 
 Register NamedStoreHandlerCompiler::value() {
   return StoreDescriptor::ValueRegister();
-}
-
-
-Handle<Code> NamedLoadHandlerCompiler::CompileLoadGlobal(
-    Handle<PropertyCell> cell, Handle<Name> name, bool is_configurable) {
-  Label miss;
-  if (IC::ICUseVector(kind())) {
-    PushVectorAndSlot();
-  }
-  FrontendHeader(receiver(), name, &miss, DONT_RETURN_ANYTHING);
-
-  // Get the value from the cell.
-  Register result = StoreDescriptor::ValueRegister();
-  Handle<WeakCell> weak_cell = factory()->NewWeakCell(cell);
-  __ LoadWeakValue(result, weak_cell, &miss);
-  __ movp(result, FieldOperand(result, PropertyCell::kValueOffset));
-
-  // Check for deleted property if property can actually be deleted.
-  if (is_configurable) {
-    __ CompareRoot(result, Heap::kTheHoleValueRootIndex);
-    __ j(equal, &miss);
-  } else if (FLAG_debug_code) {
-    __ CompareRoot(result, Heap::kTheHoleValueRootIndex);
-    __ Check(not_equal, kDontDeleteCellsCannotContainTheHole);
-  }
-
-  Counters* counters = isolate()->counters();
-  __ IncrementCounter(counters->ic_named_load_global_stub(), 1);
-  if (IC::ICUseVector(kind())) {
-    DiscardVectorAndSlot();
-  }
-  __ ret(0);
-
-  FrontendFooter(name, &miss);
-
-  // Return the generated code.
-  return GetCode(kind(), name);
 }
 
 
